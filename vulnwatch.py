@@ -78,7 +78,7 @@ LOG_DIR = STATE_DIR + "/logs"
 RESULTS_DIR = STATE_DIR + "/results"
 WORK_ROOT = CFG["work_root"]
 PATH_ENV = ":".join(os.path.expanduser(p) for p in CFG["path"].split(":"))
-OWNERS = set(CFG["github"]["owners"])
+OWNERS = {o.lower() for o in CFG["github"]["owners"]}
 ACTIVE_DAYS = CFG["github"]["active_days"]
 MAX_FIXERS = CFG["fix"]["max_parallel"]
 FIX_TIMEOUT = int(CFG["fix"]["timeout_hours"] * 3600)
@@ -199,10 +199,9 @@ def pid_alive(pid):
 
 def fixer_alive(fx, repo):
     """A fixer process for `repo` is running, or launch_command ran under 15 minutes ago and its
-    fixer may not have started yet. Overdue runs count as dead."""
+    fixer may not have started yet. Every step inside a fixer has its own timeout, so a live
+    process always ends on its own."""
     age = now() - fx.get("started", 0)
-    if age > 3 * FIX_TIMEOUT + 3600:
-        return False
     rc, so, _ = run(["pgrep", "-f", "vulnwatch.py fix %s " % repo], 10)
     return (rc == 0 and so.strip() != "") or ("handle" in fx and age < 900)
 
@@ -234,7 +233,7 @@ def active_repos():
         out[r["full_name"]] = {
             "branch": r["default_branch"],
             "pushed_at": r["pushed_at"],
-            "owned": r["owner"]["login"] in OWNERS,
+            "owned": r["owner"]["login"].lower() in OWNERS,
         }
     return out
 
@@ -986,10 +985,10 @@ def fix(repo, items_path):
     agent_dir = work + "/repo"
     result_file = work + "/result.json"
 
+    outcome = []
+
     def result(status, text, **kw):
-        os.makedirs(RESULTS_DIR, exist_ok=True)
-        with open(RESULTS_DIR + "/%s-%s.json" % (slug(repo), stamp()), "w") as f:
-            json.dump(dict(kw, repo=repo, status=status, set=sh, items=items_path, text=text), f, indent=1)
+        outcome.append(dict(kw, repo=repo, status=status, set=sh, items=items_path, text=text))
 
     try:
         must(["gh", "repo", "clone", repo, trusted, "--", "--depth", "200"], 600)
@@ -1073,6 +1072,13 @@ def fix(repo, items_path):
     finally:
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(trusted_root, ignore_errors=True)
+        # Published only after cleanup: done_command may close the window this runs in.
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        for res in outcome:
+            name = "%s-%s" % (slug(repo), stamp())
+            with open(RESULTS_DIR + "/." + name + ".tmp", "w") as f:
+                json.dump(res, f, indent=1)
+            os.replace(RESULTS_DIR + "/." + name + ".tmp", RESULTS_DIR + "/" + name + ".json")
 
 
 if __name__ == "__main__":
