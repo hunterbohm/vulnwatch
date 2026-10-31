@@ -1,0 +1,58 @@
+# Copy to ~/.config/vulnwatch/config.toml (or point VULNWATCH_CONFIG at it).
+
+# Must be under $HOME: the fixer's sandbox denies all of $HOME, which is what keeps the
+# trusted checkout and the kill switches out of the agent's reach.
+state_dir = "~/.local/state/vulnwatch"
+
+# Where the agent's working copy lives. Must be outside $HOME and on the same filesystem as
+# state_dir. /tmp works on macOS; on Linux with a tmpfs /tmp, use a folder such as /var/tmp/vulnwatch.
+work_root = "/tmp"
+
+# PATH for every command vulnwatch runs (gh, git, codex, rsync, your package managers).
+path = "/opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+[github]
+# Repos owned by these accounts get fixed and merged. Every other repo you can see is alert-only.
+owners = ["your-github-username"]
+# Only repos pushed within this many days are watched.
+active_days = 120
+# Shell-style patterns (OWNER/REPO, * wildcard) to skip entirely.
+ignore = ["your-github-username/old-*"]
+include_forks = false
+
+[fix]
+enabled = true          # false = detect and notify only
+automerge = true        # false = open reviewed PRs, never merge
+max_parallel = 2
+author_model = "gpt-6-astra"
+author_effort = "high"
+reviewer_model = "gpt-6.1-sol"
+reviewer_effort = "high"
+review_rounds = 3
+timeout_hours = 2
+git_name = "vulnwatch"
+git_email = "vulnwatch@users.noreply.github.com"
+
+# Optional: run each fix somewhere you can watch it. {fix_cmd} is the full fixer command,
+# already shell-quoted. Other fields: {repo} {name} {log} {results} {slug}.
+# The last line this prints is kept as a handle and passed to done_command.
+# Example: one tmux window per fix.
+# launch_command = "tmux new-window -d -n fix-{name} {fix_cmd} && echo fix-{name}"
+launch_command = ""
+
+# Optional: runs after every fixer outcome. Fields: {repo} {status} {pr} {handle}.
+# status is merged, reverted, blocked, failed, nofix or error.
+# done_command = "tmux kill-window -t {handle} 2>/dev/null || true"
+done_command = ""
+
+[notify]
+# Optional: notification lines are piped to this command on stdin, as well as printed.
+# Examples: a script that sends an iMessage/Slack/ntfy message.
+# command = "curl -s -d @- https://ntfy.sh/your-topic"
+command = ""
+
+[hosts]
+# Optional: run this when CISA adds new actively exploited vulnerabilities (via cve.now),
+# e.g. your own machine patch script. New ids are in $VULNWATCH_NEW_KEV.
+on_kev_command = ""
+min_gap_hours = 2
