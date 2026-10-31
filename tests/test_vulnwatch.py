@@ -96,6 +96,23 @@ class Messages(unittest.TestCase):
             v.CFG["github"]["ignore"] = []
 
 
+class Notify(unittest.TestCase):
+    def test_failed_send_is_retried_on_an_idle_pass(self):
+        out = os.path.join(tempfile.mkdtemp(), "sent.txt")
+        v.LOG_DIR = tempfile.mkdtemp()
+        v.CFG["notify"]["command"] = "exit 1"
+        try:
+            state = {}
+            v.notify(["Vulnerable: app"], state)
+            self.assertEqual(state["notify_pending"], ["Vulnerable: app"])
+            v.CFG["notify"]["command"] = "cat > %s" % out
+            v.notify([], state)
+            self.assertEqual(open(out).read(), "Vulnerable: app\n")
+            self.assertEqual(state["notify_pending"], [])
+        finally:
+            v.CFG["notify"]["command"] = ""
+
+
 class Dirs(unittest.TestCase):
     def setUp(self):
         self.saved = (v.STATE_DIR, v.WORK_ROOT)

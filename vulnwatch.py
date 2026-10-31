@@ -467,7 +467,8 @@ def notify(texts, state):
     """Print the lines (for cron mail or a wrapper that forwards stdout), and also pipe them to
     notify.command when it is set (a script that sends a text, Slack message, push, ...).
     Lines the command failed to send are kept in state and retried on the next pass."""
-    print("\n".join(texts), flush=True)
+    if texts:
+        print("\n".join(texts), flush=True)
     if not CFG["notify"]["command"]:
         return
     pending = state.get("notify_pending", []) + list(texts)
@@ -678,7 +679,7 @@ def watch(dry=False):
             print("  text: " + t)
         return
     # Print before saving: a crash between the two repeats a text rather than losing it.
-    if texts:
+    if texts or (CFG["notify"]["command"] and state.get("notify_pending")):
         notify(texts, state)
     for path, res in reported_files:
         res["reported"] = now()
