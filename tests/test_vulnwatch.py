@@ -91,6 +91,7 @@ class Messages(unittest.TestCase):
             self.assertFalse(v.ignored("me/exactly"))
             self.assertTrue(v.ignored("me/app.v1"))
             self.assertFalse(v.ignored("me/app-v1"))
+            self.assertTrue(v.ignored("Me/Old-Site"))
         finally:
             v.CFG["github"]["ignore"] = []
 

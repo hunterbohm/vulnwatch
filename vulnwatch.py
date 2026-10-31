@@ -213,7 +213,7 @@ def slug(repo):
 # ---------------------------------------------------------------- inventory
 
 def ignored(full_name):
-    return any(fnmatch.fnmatchcase(full_name, pat) for pat in CFG["github"]["ignore"])
+    return any(fnmatch.fnmatchcase(full_name.lower(), pat.lower()) for pat in CFG["github"]["ignore"])
 
 
 def active_repos():
@@ -343,7 +343,14 @@ def stack_findings(full_name, path, sid):
 
 
 def dependabot_findings(full_name):
-    alerts = gh_json("repos/%s/dependabot/alerts?state=open&per_page=100" % full_name, paginate=True)
+    """Open Dependabot alerts, or [] when alerts are off or this token can't read them."""
+    rc, so, se = run(["gh", "api", "--paginate", "--slurp",
+                      "repos/%s/dependabot/alerts?state=open&per_page=100" % full_name], 180)
+    if rc != 0:
+        if re.search(r"HTTP 40[34]|disabled|Resource not accessible", se + so):
+            return []
+        raise RuntimeError("dependabot alerts: " + (se or so).strip()[-200:])
+    alerts = [a for page in json.loads(so) for a in page]
     sev_cvss = {"critical": 9.5, "high": 8.0, "medium": 5.5, "low": 2.0}
     out = []
     for a in alerts:
@@ -549,8 +556,7 @@ def watch(dry=False):
             if repo["owned"]:
                 if not dry:
                     ensure_dependabot_alerts(full_name, rs)
-                if rs.get("alerts_enabled"):
-                    findings += dependabot_findings(full_name)
+            findings += dependabot_findings(full_name)
         except Exception as ex:
             errors.append("%s: %s" % (full_name, ex))
         if len(errors) > n_err:
