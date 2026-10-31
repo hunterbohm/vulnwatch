@@ -426,7 +426,7 @@ def maybe_run_kev_hook(state, dry, errors):
         return "would run on_kev_command for new KEV entries: " + ", ".join(new[:5])
     out = LOG_DIR + "/kev-hook-%s.out" % stamp()
     p = subprocess.Popen(cmd, shell=True, stdout=open(out, "w"), stderr=subprocess.STDOUT,
-                         start_new_session=True, env=env(VULNWATCH_NEW_KEV=",".join(new[:50])))
+                         start_new_session=True, env=env(VULNWATCH_NEW_KEV=",".join(new)))
     hook.update({"pid": p.pid, "started": now(), "out": out, "reported": False})
     state["kev_seen"] = sorted(seen | set(ids))[-3000:]
     log("on_kev_command started for new KEV %s" % new[:10])
@@ -463,15 +463,20 @@ def own_open_pr(repo):
     return False
 
 
-def notify(texts):
+def notify(texts, state):
     """Print the lines (for cron mail or a wrapper that forwards stdout), and also pipe them to
-    notify.command when it is set (a script that sends a text, Slack message, push, ...)."""
-    body = "\n".join(texts)
-    print(body, flush=True)
-    if CFG["notify"]["command"]:
-        rc, so, se = run(["/bin/sh", "-c", CFG["notify"]["command"]], 120, stdin=body + "\n")
-        if rc != 0:
-            log("notify.command failed: %s" % (se or so).strip()[-200:])
+    notify.command when it is set (a script that sends a text, Slack message, push, ...).
+    Lines the command failed to send are kept in state and retried on the next pass."""
+    print("\n".join(texts), flush=True)
+    if not CFG["notify"]["command"]:
+        return
+    pending = state.get("notify_pending", []) + list(texts)
+    rc, so, se = run(["/bin/sh", "-c", CFG["notify"]["command"]], 120, stdin="\n".join(pending) + "\n")
+    if rc == 0:
+        state["notify_pending"] = []
+    else:
+        state["notify_pending"] = pending[-200:]
+        log("notify.command failed, will retry: %s" % (se or so).strip()[-200:])
 
 
 def launch_fixer(repo, fs, fixes, state):
@@ -601,7 +606,7 @@ def watch(dry=False):
                 repo.split("/", 1)[1], top["pkg"], top.get("version") or "", top["id"], sev_word(top), more, action))
 
     if texts and not dry:
-        notify(texts)
+        notify(texts, state)
         texts = []
     # Fixer results first, so a finished run is closed out before its repo gets a new fixer.
     # One text per distinct outcome per repo.
@@ -674,7 +679,7 @@ def watch(dry=False):
         return
     # Print before saving: a crash between the two repeats a text rather than losing it.
     if texts:
-        notify(texts)
+        notify(texts, state)
     for path, res in reported_files:
         res["reported"] = now()
         json.dump(res, open(path, "w"), indent=1)
