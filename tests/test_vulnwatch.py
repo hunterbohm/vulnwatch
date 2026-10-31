@@ -84,13 +84,35 @@ class Messages(unittest.TestCase):
         self.assertEqual(v.pkg_list([]), "")
 
     def test_ignore_patterns(self):
-        v.CFG["github"]["ignore"] = ["me/old-*", "me/exact"]
+        v.CFG["github"]["ignore"] = ["me/old-*", "me/exact", "me/app.v1"]
         try:
             self.assertTrue(v.ignored("me/old-site"))
             self.assertTrue(v.ignored("me/exact"))
             self.assertFalse(v.ignored("me/exactly"))
+            self.assertTrue(v.ignored("me/app.v1"))
+            self.assertFalse(v.ignored("me/app-v1"))
         finally:
             v.CFG["github"]["ignore"] = []
+
+
+class Dirs(unittest.TestCase):
+    def setUp(self):
+        self.saved = (v.STATE_DIR, v.WORK_ROOT)
+
+    def tearDown(self):
+        v.STATE_DIR, v.WORK_ROOT = self.saved
+
+    def test_state_dir_must_be_under_home(self):
+        v.STATE_DIR, v.WORK_ROOT = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.assertIn("inside $HOME", v.dir_problem())
+
+    def test_work_root_must_be_outside_home(self):
+        home_dir = tempfile.mkdtemp(dir=v.HOME)
+        try:
+            v.STATE_DIR, v.WORK_ROOT = home_dir, home_dir
+            self.assertIn("outside $HOME", v.dir_problem())
+        finally:
+            os.rmdir(home_dir)
 
 
 if __name__ == "__main__":

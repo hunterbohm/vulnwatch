@@ -18,6 +18,7 @@ Kill switches in the state dir (default ~/.local/state/vulnwatch):
   DISABLE_AUTOMERGE  fix and open PRs, never merge
 """
 import base64
+import fnmatch
 import datetime
 import fcntl
 import hashlib
@@ -142,6 +143,24 @@ def stamp():
     return datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
 
+def dir_problem():
+    """Why state_dir/work_root would break the sandbox boundary, or None. The trusted checkout and
+    kill switches must sit under $HOME (denied to the agent); the agent's copy must sit outside it,
+    on the same filesystem so it can be moved in before it is read."""
+    home = os.path.realpath(HOME)
+    state = os.path.realpath(STATE_DIR)
+    os.makedirs(WORK_ROOT, exist_ok=True)
+    work = os.path.realpath(WORK_ROOT)
+    under = lambda p: p == home or p.startswith(home + os.sep)
+    if not under(state):
+        return "state_dir %s must be inside $HOME" % state
+    if under(work):
+        return "work_root %s must be outside $HOME" % work
+    if os.stat(state).st_dev != os.stat(work).st_dev:
+        return "work_root %s must be on the same filesystem as state_dir %s" % (work, state)
+    return None
+
+
 def killed(name):
     if name == "DISABLE_AUTOFIX" and not CFG["fix"]["enabled"]:
         return True
@@ -195,7 +214,7 @@ def slug(repo):
 # ---------------------------------------------------------------- inventory
 
 def ignored(full_name):
-    return any(re.fullmatch(pat.replace("*", ".*"), full_name) for pat in CFG["github"]["ignore"])
+    return any(fnmatch.fnmatchcase(full_name, pat) for pat in CFG["github"]["ignore"])
 
 
 def active_repos():
@@ -457,8 +476,9 @@ def launch_fixer(repo, fs, fixes, state):
     with open(items_path, "w") as f:
         json.dump(fs, f, indent=1)
     logf = LOG_DIR + "/fix-%s-%s.log" % (slug(repo), stamp())
-    fix_cmd = " ".join(shlex.quote(a) for a in [sys.executable, os.path.abspath(__file__), "fix", repo, items_path])
-    rec = {"state": "running", "started": now(), "set": set_hash(fs), "log": logf}
+    fix_cmd = " ".join(shlex.quote(a) for a in ["env", "VULNWATCH_CONFIG=" + os.path.abspath(CONFIG_PATH),
+                                                 sys.executable, os.path.abspath(__file__), "fix", repo, items_path])
+    rec = {"state": "running", "started": now(), "set": set_hash(fs), "log": logf, "items": items_path}
     template = CFG["fix"]["launch_command"]
     if template:
         cmd = template.format(repo=shlex.quote(repo), name=shlex.quote(repo.split("/", 1)[1]),
@@ -467,6 +487,7 @@ def launch_fixer(repo, fs, fixes, state):
         rc, so, se = run(["/bin/sh", "-c", cmd], 120)
         if rc == 0:
             rec["handle"] = (so.strip().splitlines() or [""])[-1]
+            state.setdefault("handles", {})[items_path] = rec["handle"]
             log("fixer launched via launch_command for %s (%d findings) handle=%s" % (repo, len(fs), rec["handle"]))
             fixes[repo] = rec
             save_state(state)
@@ -480,12 +501,14 @@ def launch_fixer(repo, fs, fixes, state):
     save_state(state)
 
 
-def run_done_command(fx, res):
+def run_done_command(state, res):
+    """Run fix.done_command for the run that produced `res` (matched by its items file)."""
+    handle = state.get("handles", {}).pop(res.get("items") or "", None)
     template = CFG["fix"]["done_command"]
     if not template:
         return
     cmd = template.format(repo=shlex.quote(res["repo"]), status=shlex.quote(res["status"]),
-                          pr=shlex.quote(res.get("pr") or ""), handle=shlex.quote(fx.get("handle") or ""))
+                          pr=shlex.quote(res.get("pr") or ""), handle=shlex.quote(handle or ""))
     run(["/bin/sh", "-c", cmd], 60)
 
 
@@ -553,6 +576,14 @@ def watch(dry=False):
             if k not in current and k.split("|", 1)[0] not in failed_repos:
                 seen.pop(k)
     autofix = not killed("DISABLE_AUTOFIX")
+    problem = dir_problem()
+    if problem:
+        autofix = False
+        if state.get("dir_problem") != problem:
+            texts.append("vulnwatch is not fixing anything: " + problem)
+        state["dir_problem"] = problem
+    else:
+        state.pop("dir_problem", None)
     if not first_run:
         for repo, fs in sorted(new_by_repo.items()):
             fs.sort(key=lambda f: (not f.get("kev"), -(f.get("cvss") or 0)))
@@ -560,13 +591,35 @@ def watch(dry=False):
             more = " +%d more" % (len(fs) - 1) if len(fs) > 1 else ""
             owned = repos_state.get(repo, {}).get("owned")
             action = "Fixing it now." if owned and autofix else "Not auto-fixing (%s)." % (
-                "autofix is off" if owned else "not your repo")
+                "autofix is off" if owned else "not one of your fix owners")
             texts.append("Vulnerable: %s uses %s %s (%s, %s)%s. %s" % (
                 repo.split("/", 1)[1], top["pkg"], top.get("version") or "", top["id"], sev_word(top), more, action))
 
     if texts and not dry:
         notify(texts)
         texts = []
+    # Fixer results first, so a finished run is closed out before its repo gets a new fixer.
+    # One text per distinct outcome per repo.
+    for name in sorted(os.listdir(RESULTS_DIR)):
+        path = RESULTS_DIR + "/" + name
+        if not name.endswith(".json"):
+            continue
+        try:
+            res = json.load(open(path))
+        except ValueError:
+            continue
+        if res.get("reported"):
+            continue
+        fx = fixes.setdefault(res["repo"], {})
+        fx["outcome"] = res["status"]
+        if not dry:
+            run_done_command(state, res)
+        key = "%s|%s" % (res["status"], res.get("set") or res.get("text"))
+        if res["status"] == "merged" or fx.get("last_text_key") != key:
+            texts.append(res["text"])
+        fx["last_text_key"] = key
+        reported_files.append((path, res))
+
     for repo, fx in fixes.items():
         if fx.get("state") == "running" and not fixer_alive(fx, repo):
             fx["state"] = "done"
@@ -588,27 +641,6 @@ def watch(dry=False):
             continue
         launch_fixer(repo, fs, fixes, state)
         running += 1
-
-    # Fixer results. One text per distinct outcome per repo.
-    for name in sorted(os.listdir(RESULTS_DIR)):
-        path = RESULTS_DIR + "/" + name
-        if not name.endswith(".json"):
-            continue
-        try:
-            res = json.load(open(path))
-        except ValueError:
-            continue
-        if res.get("reported"):
-            continue
-        fx = fixes.setdefault(res["repo"], {})
-        fx["outcome"] = res["status"]
-        if not dry:
-            run_done_command(fx, res)
-        key = "%s|%s" % (res["status"], res.get("set") or res.get("text"))
-        if res["status"] == "merged" or fx.get("last_text_key") != key:
-            texts.append(res["text"])
-        fx["last_text_key"] = key
-        reported_files.append((path, res))
 
     texts += kev_hook_report(state)
     hint = maybe_run_kev_hook(state, dry, errors)
@@ -934,6 +966,9 @@ def pkg_list(fixed):
 
 
 def fix(repo, items_path):
+    problem = dir_problem()
+    if problem:
+        raise SystemExit("vulnwatch fix: " + problem)
     lock = open(STATE_DIR + "/fix-%s.lock" % slug(repo), "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -954,7 +989,7 @@ def fix(repo, items_path):
     def result(status, text, **kw):
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with open(RESULTS_DIR + "/%s-%s.json" % (slug(repo), stamp()), "w") as f:
-            json.dump(dict(kw, repo=repo, status=status, set=sh, text=text), f, indent=1)
+            json.dump(dict(kw, repo=repo, status=status, set=sh, items=items_path, text=text), f, indent=1)
 
     try:
         must(["gh", "repo", "clone", repo, trusted, "--", "--depth", "200"], 600)
